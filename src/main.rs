@@ -1,9 +1,15 @@
 use axum::{
-    Router, extract::State, http::StatusCode, response::{IntoResponse, Json}, routing::get
+    Router, 
+    extract::State,
+    http::StatusCode, 
+    response::{IntoResponse, Json},
+    routing::get,
+    extract::Path
 };
 use serde::{Serialize, Deserialize};
 use clap::Parser;
 use std::sync::Arc;
+use reqwest::Client;
 
 #[derive(Serialize)]
 struct Response {
@@ -30,6 +36,10 @@ impl Default for Config {
             extra_values: None,
         }
     }
+}
+struct AppState {
+    config: Config,
+    http_client: reqwest::Client,
 }
 
 #[derive(Parser, Debug)]
@@ -68,39 +78,21 @@ async fn main() {
 
     println!("{}", &server_config_contents);
     // Wrapped server_config which is why no reference used.
-    let shared_config = Arc::new(server_config);
+    let shared_config = Arc::new(AppState {
+        config: server_config,
+        http_client: Client::new(),
+    });
 
     // app with routes and fallback
     let app = Router::new()
-        .route("/", get(root))
         .route("/health", get(health))
         .route("/config", get(config))
-        .fallback(fallback)
+        .route("/{*path}", get(proxy))
         .with_state(shared_config.clone());
 
     // run app with hyper, listening on port suggested by the CLI
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", shared_config.backend_url, shared_config.port)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", shared_config.config.port)).await.unwrap();
     axum::serve(listener, app).await.unwrap();
-}
-
-async fn fallback() -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        Json(Response {
-            data: "Unidentified endpoint".to_string(),
-            code: 404,
-        })
-    )
-}
-
-async fn root() -> impl IntoResponse {
-    (
-        StatusCode::ACCEPTED,
-        Json(Response {
-            data: "Hello, World".to_string(),
-            code: 200,
-        })
-    )
 }
 
 async fn health() -> impl IntoResponse {
@@ -113,12 +105,31 @@ async fn health() -> impl IntoResponse {
     )
 }
 
-async fn config(State(config): State<Arc<Config>>) -> impl IntoResponse {
+async fn config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
         StatusCode::ACCEPTED,
         Json(Response {
-            data: format!( "backend_url:{}", config.backend_url),
+            data: format!( "backend_url:{}", state.config.backend_url),
             code: 200,
         })
     )
+}
+
+async fn proxy(State(state): State<Arc<AppState>>, Path(path): Path<String>,) -> impl IntoResponse {
+   // use the shared config that creates a new http_client
+   let response = state.http_client
+    .get(format!("{}/{}",&state.config.backend_url,&path.trim_end_matches('/')))
+    .header("Authorization", format!("Bearer {}", state.config.secret_token))
+    .send()
+    .await;
+
+    match response {
+        Ok(res) => {
+            let body = res.text().await.unwrap_or_default();
+            (StatusCode::OK, body)
+        }
+        Err(e) => {
+            (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e))
+        }
+    }
 }
