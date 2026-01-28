@@ -1,10 +1,10 @@
 use axum::{
-    Router, 
-    extract::State,
-    http::StatusCode, 
-    response::{IntoResponse, Json},
+    Router,
+    extract::{Path, Request, State},
+    http::{HeaderValue, StatusCode, header},
+    middleware::{Next, from_fn_with_state},
+    response::{IntoResponse, Json, Response},
     routing::get,
-    extract::Path
 };
 use serde::{Serialize, Deserialize};
 use clap::Parser;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use reqwest::Client;
 
 #[derive(Serialize)]
-struct Response {
+struct ApiResponse {
     data: String,
     code: u16,
 }
@@ -88,6 +88,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/config", get(config))
         .route("/{*path}", get(proxy))
+        .layer(from_fn_with_state(shared_config.clone(), my_middleware))
         .with_state(shared_config.clone());
 
     // run app with hyper, listening on port suggested by the CLI
@@ -98,7 +99,7 @@ async fn main() {
 async fn health() -> impl IntoResponse {
     (
         StatusCode::ACCEPTED,
-        Json(Response {
+        Json(ApiResponse {
             data: "OK".to_string(),
             code: 200,
         })
@@ -108,20 +109,31 @@ async fn health() -> impl IntoResponse {
 async fn config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
         StatusCode::ACCEPTED,
-        Json(Response {
+        Json(ApiResponse {
             data: format!( "backend_url:{}", state.config.backend_url),
             code: 200,
         })
     )
 }
 
-async fn proxy(State(state): State<Arc<AppState>>, Path(path): Path<String>,) -> impl IntoResponse {
-   // use the shared config that creates a new http_client
-   let response = state.http_client
-    .get(format!("{}/{}",&state.config.backend_url,&path.trim_end_matches('/')))
-    .header("Authorization", format!("Bearer {}", state.config.secret_token))
-    .send()
-    .await;
+async fn proxy(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<String>,
+    request: Request,
+) -> impl IntoResponse {
+    // Read the Authorization header that middleware added
+    let auth_header = request.headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let mut outgoing = state.http_client
+        .get(format!("{}/{}", &state.config.backend_url, &path.trim_end_matches('/')));
+
+    if let Some(auth) = auth_header {
+        outgoing = outgoing.header("Authorization", auth);
+    }
+
+    let response = outgoing.send().await;
 
     match response {
         Ok(res) => {
@@ -132,4 +144,16 @@ async fn proxy(State(state): State<Arc<AppState>>, Path(path): Path<String>,) ->
             (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e))
         }
     }
+}
+
+async fn my_middleware(State(state): State<Arc<AppState>>, mut request: Request, next: Next) -> Result<Response, StatusCode> {
+    let bearer_token = format!("Bearer {}", state.config.secret_token);
+    let header_val = HeaderValue::from_str(&bearer_token)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        header_val,
+    );
+    Ok(next.run(request).await)
 }
