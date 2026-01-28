@@ -1,9 +1,9 @@
 use axum::{
-    Router, http::StatusCode,
-    response::{IntoResponse, Json}, routing::get
+    Router, extract::State, http::StatusCode, response::{IntoResponse, Json}, routing::get
 };
 use serde::{Serialize, Deserialize};
 use clap::Parser;
+use std::sync::Arc;
 
 #[derive(Serialize)]
 struct Response {
@@ -67,15 +67,19 @@ async fn main() {
     };
 
     println!("{}", &server_config_contents);
+    // Wrapped server_config which is why no reference used.
+    let shared_config = Arc::new(server_config);
 
     // app with routes and fallback
     let app = Router::new()
         .route("/", get(root))
         .route("/health", get(health))
-        .fallback(fallback);
+        .route("/config", get(config))
+        .fallback(fallback)
+        .with_state(shared_config.clone());
 
     // run app with hyper, listening on port suggested by the CLI
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", server_config.backend_url, server_config.port)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", shared_config.backend_url, shared_config.port)).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -104,6 +108,16 @@ async fn health() -> impl IntoResponse {
         StatusCode::ACCEPTED,
         Json(Response {
             data: "OK".to_string(),
+            code: 200,
+        })
+    )
+}
+
+async fn config(State(config): State<Arc<Config>>) -> impl IntoResponse {
+    (
+        StatusCode::ACCEPTED,
+        Json(Response {
+            data: format!( "backend_url:{}", config.backend_url),
             code: 200,
         })
     )
