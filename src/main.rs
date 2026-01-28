@@ -1,10 +1,8 @@
 use axum::{
-    routing::get,
-    Router,
-    http::StatusCode,
-    response::{IntoResponse, Json}
+    Router, http::StatusCode,
+    response::{IntoResponse, Json}, routing::get
 };
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use clap::Parser;
 
 #[derive(Serialize)]
@@ -13,22 +11,63 @@ struct Response {
     code: u16,
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields, default)] // Catch typos in config and has default values
+struct Config {
+    backend_url: String,
+    secret_token: String,
+    port: u16,
+    extra_values: Option<String>,
+}
+
+// Implementation of the default values - serde(default) ensures that the default values are taken from here
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            backend_url: "0.0.0.0".to_string(),
+            secret_token: "my-secret-token".to_string(),
+            port: 3000,
+            extra_values: None,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(long, short, default_value="3000", env ="SECRET_PROXY_PORT")]
-    port: u16
+    #[arg(long, short, default_value="config.yaml", env ="CONFIG_PATH")]
+    config: String
 }
 
 #[tokio::main]
 async fn main() {
     // matching arguments passed but also allowing for a graceful shutdown
     let args = match Args::try_parse() {
-        Ok(args) => args,
+        Ok(args) => args, // must return args to keep it in scope
         Err(e) => {
             println!("Error: {}", e);
             std::process::exit(1);
         }
     };
+
+    // Deserialize config_file - current file name only as it is in header of file
+    let server_config_contents = match std::fs::read_to_string(&args.config) {
+        Ok(contents) => contents,
+        Err(e) => {
+            eprintln!("Failed to read config file '{}': {}", args.config, e);
+            std::process::exit(1);
+        }
+    };
+
+    let server_config: Config = match serde_yaml::from_str(&server_config_contents) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to parse file '{}': {}", {args.config}, e);
+            std::process::exit(1);
+        }
+    };
+
+    println!("{}", &server_config_contents);
+
     // app with routes and fallback
     let app = Router::new()
         .route("/", get(root))
@@ -36,7 +75,7 @@ async fn main() {
         .fallback(fallback);
 
     // run app with hyper, listening on port suggested by the CLI
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", server_config.backend_url, server_config.port)).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
