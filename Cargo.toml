@@ -9,4 +9,4 @@ clap = { version = "4.5.54", features = ["derive", "env"] }
 reqwest = { version = "0.13.1", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34-deprecated"
-tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "signal"] }

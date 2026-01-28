@@ -10,6 +10,7 @@ use serde::{Serialize, Deserialize};
 use clap::Parser;
 use std::sync::Arc;
 use reqwest::Client;
+use tokio::signal;
 
 #[derive(Serialize)]
 struct ApiResponse {
@@ -47,6 +48,14 @@ struct Args {
     #[arg(long, short, default_value="config.yaml", env ="CONFIG_PATH")]
     config: String
 }
+
+async fn shutdown_signal() {
+    signal::ctrl_c()
+        .await
+        .expect("Failed to implement Ctrl+C  handler");
+    println!("Shutdown signal received, starting graceful shutdown...");
+}
+
 
 #[tokio::main]
 async fn main() {
@@ -93,7 +102,12 @@ async fn main() {
 
     // run app with hyper, listening on port suggested by the CLI
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", shared_config.config.port)).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+
+    println!("Server shut down gracefully");
 }
 
 async fn health() -> impl IntoResponse {
